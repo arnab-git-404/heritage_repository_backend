@@ -24,42 +24,15 @@ const userSchema = new mongoose.Schema({
     minlength: [6, 'Password must be at least 6 characters long'],
     select: false
   },
-  // ✅ NEW: Profile fields
+  // Access control: what the user is allowed to do is derived from this Role,
+  // via the Role -> RolePermission -> Permission chain. Only ever changed
+  // through the admin "update user role" endpoint - never self-service.
   role: {
-    type: String,
-    enum: ['Custodian', 'Researcher', 'Contributor', 'Viewer'],
-    default: 'Viewer'
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Role',
+    required: [true, 'User must have a role']
   },
-  country: {
-    type: String,
-    trim: true,
-    maxlength: [100, 'Country name cannot be more than 100 characters']
-  },
-  state: {
-    type: String,
-    trim: true,
-    maxlength: [100, 'State/Region name cannot be more than 100 characters']
-  },
-  tribe: {
-    type: String,
-    trim: true,
-    maxlength: [100, 'Tribe/Community name cannot be more than 100 characters']
-  },
-  village: {
-    type: String,
-    trim: true,
-    maxlength: [100, 'Village/Town name cannot be more than 100 characters']
-  },
-  bio: {
-    type: String,
-    trim: true,
-    maxlength: [2000, 'Bio cannot be more than 2000 characters']
-  },
-  avatar: {
-    type: String,
-    trim: true
-  },
-  // ✅ Password reset fields
+  // Password reset fields
   resetPasswordToken: {
     type: String,
     select: false
@@ -67,19 +40,24 @@ const userSchema = new mongoose.Schema({
   resetPasswordExpires: {
     type: Date,
     select: false
-  },
-  createdAt: {
-    type: Date,
-    default: Date.now
   }
 }, {
   timestamps: true // Automatically adds createdAt and updatedAt
 });
 
+// Profile fields (country, state, tribe, village, bio, avatar) live on the
+// separate UserDetails model, referenced by UserDetails.user -> User._id.
+userSchema.virtual('details', {
+  ref: 'UserDetails',
+  localField: '_id',
+  foreignField: 'user',
+  justOne: true
+});
+
 // Hash password before saving
 userSchema.pre('save', async function(next) {
   if (!this.isModified('password')) return next();
-  
+
   try {
     const salt = await bcrypt.genSalt(10);
     this.password = await bcrypt.hash(this.password, salt);

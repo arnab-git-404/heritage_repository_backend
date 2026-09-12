@@ -3,6 +3,8 @@ import multer from 'multer';
 import jwt from 'jsonwebtoken';
 import { v2 as cloudinary } from 'cloudinary';
 import { Readable } from 'stream';
+import MediaAsset from '../models/MediaAsset.js';
+import { registerUpload } from '../services/mediaAssets.js';
 
 
 const router = express.Router();
@@ -172,9 +174,9 @@ router.post('/', requireAuth, upload.single('file'), async (req, res) => {
 
     // Validate Cloudinary config
     const requiredVars = [
-      CLOUDINARY_CLOUD_NAME,
-      CLOUDINARY_API_KEY,
-      CLOUDINARY_API_SECRET
+      'CLOUDINARY_CLOUD_NAME',
+      'CLOUDINARY_API_KEY',
+      'CLOUDINARY_API_SECRET'
     ];
     
     const missingVars = requiredVars.filter(varName => !process.env[varName]);
@@ -204,8 +206,10 @@ router.post('/', requireAuth, upload.single('file'), async (req, res) => {
       throw new Error('Upload failed: No URL returned from Cloudinary');
     }
 
+    const asset = await registerUpload(req.userId, result, req.file);
     // Return response
     return res.json({
+      assetId: asset._id,
       url: result.secure_url,
       path: result.secure_url,
       publicId: result.public_id,
@@ -250,13 +254,24 @@ router.delete('/', requireAuth, async (req, res) => {
       });
     }
 
-    const result = await cloudinary.uploader.destroy(publicId, { 
-      resource_type: resourceType,
-      invalidate: true
-    });
-
-    if (result.result !== 'ok') {
-      throw new Error(result.result || 'Failed to delete file');
+    // Atomically claim an owned, unattached asset. Retained historical files cannot be deleted here.
+    const asset = await MediaAsset.findOneAndUpdate({
+      ownerId: req.userId, provider: 'cloudinary', publicId, resourceType,
+      retained: false, status: 'active',
+    }, { $set: { status: 'deleting' } }, { new: true });
+    if (!asset) {
+      return res.status(409).json({ errors: [{ msg: 'File is unavailable, not owned by you, or retained in submission history' }] });
+    }
+    try {
+      const result = await cloudinary.uploader.destroy(asset.publicId, {
+        resource_type: asset.resourceType, invalidate: true
+      });
+      if (!['ok', 'not found'].includes(result.result)) throw new Error('Failed to delete file');
+      asset.status = 'deleted';
+      await asset.save();
+    } catch (error) {
+      await MediaAsset.updateOne({ _id: asset._id, status: 'deleting' }, { $set: { status: 'active' } });
+      throw error;
     }
 
     return res.json({ success: true });

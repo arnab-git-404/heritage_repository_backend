@@ -1,419 +1,28 @@
-
-// import express from "express";
-// import Submission from "../models/Submission.js";
-// import ApprovedContent from "../models/ApprovedContent.js";
-// import User from "../models/User.js";
-// import jwt from "jsonwebtoken";
-// import { v2 as cloudinary } from "cloudinary";
-// import { dbConnect } from "../utils/db.js";
-// import { sendApprovalEmail, sendRejectionEmail } from "../utils/mailer.js";
-
-// const router = express.Router();
-
-// router.post("/login", async (req, res) => {
-//   const { email, password } = req.body || {};
-
-//   const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
-//   const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
-
-//   if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
-//     return res.status(500).json({
-//       errors: [{ msg: "Server misconfiguration: admin credentials not set" }],
-//     });
-//   }
-//   if (email !== ADMIN_EMAIL || password !== ADMIN_PASSWORD) {
-//     return res
-//       .status(401)
-//       .json({ errors: [{ msg: "Invalid admin credentials" }] });
-//   }
-//   if (!process.env.JWT_SECRET) {
-//     return res.status(500).json({
-//       errors: [{ msg: "Server misconfiguration: JWT secret not set" }],
-//     });
-//   }
-
-//   const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: "30d" });
-
-//   res.json({ token });
-// });
-
-// // TODO: Implement proper admin middleware
-// // For now, simplified version
-// function requireAdmin(req, res, next) {
-//   const auth = req.headers.authorization || "";
-//   const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
-
-//   if (!token) {
-//     return res
-//       .status(401)
-//       .json({ errors: [{ msg: "Authentication required" }] });
-//   }
-
-//   try {
-//     const payload = jwt.verify(token, process.env.JWT_SECRET);
-//     if (!payload?.user?.id) {
-//       return res.status(401).json({ errors: [{ msg: "Invalid token" }] });
-//     }
-
-//     // TODO: Check if user is admin from database
-//     // For now, allow all authenticated users
-//     req.userId = payload.user.id;
-//     next();
-//   } catch (error) {
-//     return res
-//       .status(401)
-//       .json({ errors: [{ msg: "Invalid or expired token" }] });
-//   }
-// }
-
-// // GET /api/admin/submissions?status=pending - Get submissions by status
-// router.get("/submissions", requireAdmin, async (req, res) => {
-//   try {
-//     const { status = "pending" } = req.query;
-
-//     const submissions = await Submission.find({ status })
-//       .populate("userId", "name email")
-//       .sort({ createdAt: -1 })
-//       .select("-__v");
-
-//     res.json(submissions);
-//   } catch (error) {
-//     console.error("Fetch submissions error:", error);
-//     res.status(500).json({ errors: [{ msg: "Failed to fetch submissions" }] });
-//   }
-// });
-
-// // PATCH /api/admin/submissions/:id/status - Approve or reject submission
-// router.patch("/submissions/:id/status", requireAdmin, async (req, res) => {
-//   try {
-//     const { status, reason } = req.body;
-
-//     if (!["approved", "rejected"].includes(status)) {
-//       return res.status(400).json({ errors: [{ msg: "Invalid status" }] });
-//     }
-
-//     const submission = await Submission.findById(req.params.id).populate(
-//       "userId",
-//       "name email"
-//     );
-
-//     if (!submission) {
-//       return res
-//         .status(404)
-//         .json({ errors: [{ msg: "Submission not found" }] });
-//     }
-
-//     if (submission.status !== "pending") {
-//       return res
-//         .status(400)
-//         .json({ errors: [{ msg: "Submission already processed" }] });
-//     }
-
-//     // Extract user details
-//     const userName = submission.userId?.name || "User";
-//     const userEmail = submission.userId?.email;
-//     const submissionTitle = submission.title || "Untitled Submission";
-
-//     if (status === "rejected") {
-//       // Update submission status
-//       submission.status = status;
-//       submission.rejectionReason = reason;
-//       submission.reviewedBy = req.userId;
-//       submission.reviewedAt = new Date();
-
-//       await submission.save();
-
-//       // Send rejection email
-//       if (userEmail) {
-//         try {
-//           await sendRejectionEmail(
-//             userEmail,
-//             userName,
-//             submissionTitle,
-//             reason
-//           );
-//           console.log(`Rejection email sent to ${userEmail}`);
-//         } catch (emailError) {
-//           console.error("Failed to send rejection email:", emailError);
-//           // Don't fail the request if email fails
-//         }
-//       }
-
-//       return res.json({
-//         message: `Submission ${status} successfully`,
-//         emailSent: !!userEmail,
-//       });
-//     }
-
-//     // If approved, copy to ApprovedContent collection
-//     if (status === "approved") {
-//       const approvedContent = new ApprovedContent({
-//         submissionId: submission._id,
-//         userId: submission.userId,
-//         country: submission.country,
-//         stateRegion: submission.stateRegion,
-//         tribe: submission.tribe,
-//         village: submission.village,
-//         culturalDomain: submission.culturalDomain,
-//         title: submission.title,
-//         description: submission.description,
-//         keywords: submission.keywords,
-//         language: submission.language,
-//         dateOfRecording: submission.dateOfRecording,
-//         culturalSignificance: submission.culturalSignificance,
-//         contentFileType: submission.contentFileType,
-//         contentUrl: submission.contentUrl,
-//         contentCloudinaryId: submission.contentCloudinaryId,
-//         consent: submission.consent,
-//         accessTier: submission.accessTier,
-//         contentWarnings: submission.contentWarnings,
-//         warningOtherText: submission.warningOtherText,
-//         translationFileUrl: submission.translationFileUrl,
-//         backgroundInfo: submission.backgroundInfo,
-//         verificationDocUrl: submission.verificationDocUrl,
-//         approvedBy: req.userId,
-//         approvedAt: new Date(),
-//       });
-
-//       await approvedContent.save();
-
-//       // Update submission status
-//       submission.status = status;
-//       submission.reviewedBy = req.userId;
-//       submission.reviewedAt = new Date();
-
-//       await submission.save();
-
-//       // Send approval email
-//       if (userEmail) {
-//         try {
-//           await sendApprovalEmail(
-//             userEmail,
-//             userName,
-//             submissionTitle,
-//             submission._id
-//           );
-//           console.log(`Approval email sent to ${userEmail}`);
-//         } catch (emailError) {
-//           console.error("Failed to send approval email:", emailError);
-//           // Don't fail the request if email fails
-//         }
-//       }
-
-//       // Update submission status
-//       res.json({
-//         message: `Submission ${status} successfully`,
-//         submission,
-//         emailSent: !!userEmail,
-//       });
-//     }
-//   } catch (error) {
-//     console.error("Update status error:", error);
-//     res.status(500).json({ errors: [{ msg: "Failed to update status" }] });
-//   }
-// });
-
-// // DELETE /api/admin/submissions/:id - Delete submission (admin only)
-// router.delete(
-//   "/submissions/:submissionStatus/:submissionId",
-//   requireAdmin,
-//   async (req, res) => {
-//     try {
-//       const { submissionStatus, submissionId } = req.params;
-
-//       // if (submissionStatus === 'approved') {
-//       // await dbConnect();
-
-//       //   await ApprovedContent.findByIdAndDelete(submissionId);
-//       // }
-
-//       // if (submissionStatus === 'rejected' && !submissionId) {
-
-//       //   await dbConnect();
-//       //   await Submission.findByIdAndDelete(submissionId);
-//       //   return res.json({ message: 'Rejected submission deleted successfully' });
-
-//       // }
-
-//       // const submission = await Submission.findById(req.params.id);
-
-//       const submission = await Submission.findById(submissionId).populate(
-//         "userId",
-//         "name email"
-//       );
-
-//       if (!submission) {
-//         return res
-//           .status(404)
-//           .json({ errors: [{ msg: "Submission not found" }] });
-//       }
-
-//       // Extract user details for email
-//       const userName = submission.userId?.name || "User";
-//       const userEmail = submission.userId?.email;
-//       const submissionTitle = submission.title || "Untitled Submission";
-
-//       // // Delete files from Cloudinary
-//       // if (submission.contentCloudinaryId) {
-//       //   await cloudinary.uploader
-//       //     .destroy(submission.contentCloudinaryId)
-//       //     .catch((err) => console.error("Cloudinary delete error:", err));
-//       // }
-
-//       // if (submission.translationCloudinaryId) {
-//       //   await cloudinary.uploader
-//       //     .destroy(submission.translationCloudinaryId)
-//       //     .catch((err) => console.error("Cloudinary delete error:", err));
-//       // }
-
-//       // if (submission.verificationCloudinaryId) {
-//       //   await cloudinary.uploader
-//       //     .destroy(submission.verificationCloudinaryId)
-//       //     .catch((err) => console.error("Cloudinary delete error:", err));
-//       // }
-
-//       // Delete files from Cloudinary
-
-//       const cloudinaryDeletions = [];
-
-//       if (submission.contentCloudinaryId) {
-//         cloudinaryDeletions.push(
-//           cloudinary.uploader
-//             .destroy(submission.contentCloudinaryId)
-//             .catch((err) => console.error("Cloudinary delete error:", err))
-//         );
-//       }
-
-//       if (submission.translationCloudinaryId) {
-//         cloudinaryDeletions.push(
-//           cloudinary.uploader
-//             .destroy(submission.translationCloudinaryId)
-//             .catch((err) => console.error("Cloudinary delete error:", err))
-//         );
-//       }
-
-//       if (submission.verificationCloudinaryId) {
-//         cloudinaryDeletions.push(
-//           cloudinary.uploader
-//             .destroy(submission.verificationCloudinaryId)
-//             .catch((err) => console.error("Cloudinary delete error:", err))
-//         );
-//       }
-
-//       // Wait for all Cloudinary deletions
-//       await Promise.all(cloudinaryDeletions);
-
-//       if (submissionStatus === "approved") {
-        
-//         await ApprovedContent.findOneAndDelete({
-//           submissionId: submission._id,
-//         }).then(async () => {
-//           await Submission.findByIdAndDelete(submission._id);
-//         });
-
-//         return res.json({
-//           message: "Approved submission deleted successfully",
-//         });
-//       }
-
-//       if (submissionStatus === "rejected") {
-//         await Submission.findByIdAndDelete(submission._id);
-
-//         // Send email notification about deletion with rejection reason
-//         if (userEmail) {
-//           try {
-//             const reason =
-//               submission.rejectionReason ||
-//               "Your submission did not meet our guidelines.";
-//             await sendRejectionEmail(
-//               userEmail,
-//               userName,
-//               submissionTitle,
-//               `${reason}\n\nNote: This submission has been permanently removed from our system.`
-//             );
-//             console.log(`Deletion notification email sent to ${userEmail}`);
-//           } catch (emailError) {
-//             console.error("Failed to send deletion email:", emailError);
-//           }
-//         }
-
-//         return res.json({
-//           message: "Rejected submission deleted successfully",
-//           emailSent: !!userEmail,
-//         });
-//       }
-//     } catch (error) {
-//       console.error("Delete submission error:", error);
-//       res
-//         .status(500)
-//         .json({ errors: [{ msg: "Failed to delete submission" }] });
-//     }
-//   }
-// );
-
-// // GET /api/admin/users - Get all users
-// router.get("/users", requireAdmin, async (req, res) => {
-//   try {
-//     const users = await User.find()
-//       .select("-password -__v")
-//       .sort({ createdAt: -1 });
-
-//     res.json(users);
-//   } catch (error) {
-//     console.error("Fetch users error:", error);
-//     res.status(500).json({ errors: [{ msg: "Failed to fetch users" }] });
-//   }
-// });
-
-// export default router;
-
-
-
-
+import { reviewAmendment, reviewSubmission } from '../services/contentHistory.js';
 import express from "express";
 import Submission from "../models/Submission.js";
 import ApprovedContent from "../models/ApprovedContent.js";
 import User from "../models/User.js";
+import UserDetails from "../models/UserDetails.js";
 import jwt from "jsonwebtoken";
 import { v2 as cloudinary } from "cloudinary";
 import { sendMail } from "../utils/mailer.js";
 import AmendmentRequest from '../models/AmendmentRequest.js';
+import Role from "../models/Role.js";
+import Permission from "../models/Permission.js";
+import RolePermission from "../models/RolePermission.js";
+import { mergeUserWithDetails, mergeUsersWithDetails, attachUserDetails } from "../utils/userDetails.js";
+import { requirePermission } from "../middleware/rbac.js";
+import { PERMISSIONS } from "../constants/permissions.js";
 
 const router = express.Router();
 
 // ===== Authentication =====
-router.post("/login", async (req, res) => {
-  const { email, password } = req.body || {};
-  const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
-  const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
-
-  if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
-    return res.status(500).json({
-      errors: [{ msg: "Server misconfiguration: admin credentials not set" }],
-    });
-  }
-  if (email !== ADMIN_EMAIL || password !== ADMIN_PASSWORD) {
-    return res
-      .status(401)
-      .json({ errors: [{ msg: "Invalid admin credentials" }] });
-  }
-  if (!process.env.JWT_SECRET) {
-    return res.status(500).json({
-      errors: [{ msg: "Server misconfiguration: JWT secret not set" }],
-    });
-  }
-
-  const payload = { 
-    user: { id: "admin", role: "admin" },
-    role: "admin" 
-  };
-  const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: "30d" });
-
-  res.json({ token });
-});
-
-// ===== Middleware =====
-function requireAdmin(req, res, next) {
+// There is no separate admin login. Admins are regular users (see routes/auth.js
+// POST /register + /login) whose role has been granted admin permissions - see
+// PATCH /users/:id/role below, and scripts/seed-rbac.js for bootstrapping the
+// first admin.
+function requireAuth(req, res, next) {
   const auth = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
 
@@ -422,15 +31,18 @@ function requireAdmin(req, res, next) {
       .status(401)
       .json({ errors: [{ msg: "Authentication required" }] });
   }
+  if (!process.env.JWT_SECRET) {
+    return res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({
+      errors: [{ msg: "Server misconfiguration: JWT secret not set" }],
+    });
+  }
 
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
-    
-    // if (payload.role !== "admin") {
-    //   return res.status(403).json({ errors: [{ msg: "Admin access required" }] });
-    // }
-
-    req.adminId = payload.user?.id || "admin";
+    if (!payload || !payload.user || !payload.user.id) {
+      return res.status(401).json({ errors: [{ msg: "Invalid token" }] });
+    }
+    req.userId = payload.user.id;
     next();
   } catch (error) {
     return res
@@ -440,7 +52,7 @@ function requireAdmin(req, res, next) {
 }
 
 // ===== Dashboard Stats =====
-router.get("/stats", requireAdmin, async (req, res) => {
+router.get("/stats", requireAuth, requirePermission(PERMISSIONS.DASHBOARD_VIEW), async (req, res) => {
   try {
     const [
       totalUsers,
@@ -486,12 +98,12 @@ router.get("/stats", requireAdmin, async (req, res) => {
     });
   } catch (error) {
     console.error("Stats error:", error);
-    res.status(500).json({ errors: [{ msg: "Failed to fetch stats" }] });
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ errors: [{ msg: "Failed to fetch stats" }] });
   }
 });
 
 // ===== Submissions Management =====
-router.get("/submissions", requireAdmin, async (req, res) => {
+router.get("/submissions", requireAuth, requirePermission(PERMISSIONS.SUBMISSION_VIEW_ANY), async (req, res) => {
   try {
     const { status = "pending", page = 1, limit = 20, search = "" } = req.query;
 
@@ -508,7 +120,11 @@ router.get("/submissions", requireAdmin, async (req, res) => {
 
     const [submissions, total] = await Promise.all([
       Submission.find(query)
-        .populate("userId", "name email avatar role country tribe")
+        .populate({
+          path: "userId",
+          select: "name email role",
+          populate: { path: "role", select: "name" },
+        })
         .populate("reviewedBy", "name email")
         .sort({ createdAt: -1 })
         .skip(skip)
@@ -517,8 +133,14 @@ router.get("/submissions", requireAdmin, async (req, res) => {
       Submission.countDocuments(query),
     ]);
 
-    res.json({
+    const submissionsWithDetails = await attachUserDetails(
       submissions,
+      "userId",
+      ["avatar", "country", "tribe"]
+    );
+
+    res.json({
+      submissions: submissionsWithDetails,
       pagination: {
         total,
         page: parseInt(page),
@@ -528,15 +150,19 @@ router.get("/submissions", requireAdmin, async (req, res) => {
     });
   } catch (error) {
     console.error("Fetch submissions error:", error);
-    res.status(500).json({ errors: [{ msg: "Failed to fetch submissions" }] });
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ errors: [{ msg: "Failed to fetch submissions" }] });
   }
 });
 
 // ===== Get Single Submission Details =====
-router.get("/submissions/:id", requireAdmin, async (req, res) => {
+router.get("/submissions/:id", requireAuth, requirePermission(PERMISSIONS.SUBMISSION_VIEW_ANY), async (req, res) => {
   try {
     const submission = await Submission.findById(req.params.id)
-      .populate("userId", "name email avatar role country state tribe village bio")
+      .populate({
+        path: "userId",
+        select: "name email role",
+        populate: { path: "role", select: "name" },
+      })
       .populate("reviewedBy", "name email");
 
     if (!submission) {
@@ -551,15 +177,21 @@ router.get("/submissions/:id", requireAdmin, async (req, res) => {
       }).populate("approvedBy", "name email");
     }
 
-    res.json({ submission, approvedContent });
+    const submissionWithDetails = await attachUserDetails(
+      submission,
+      "userId",
+      ["avatar", "country", "state", "tribe", "village", "bio"]
+    );
+
+    res.json({ submission: submissionWithDetails, approvedContent });
   } catch (error) {
     console.error("Fetch submission error:", error);
-    res.status(500).json({ errors: [{ msg: "Failed to fetch submission" }] });
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ errors: [{ msg: "Failed to fetch submission" }] });
   }
 });
 
 // ===== Approve/Reject Submission =====
-router.patch("/submissions/:id/status", requireAdmin, async (req, res) => {
+router.patch("/submissions/:id/status", requireAuth, requirePermission(PERMISSIONS.SUBMISSION_APPROVE), async (req, res) => {
   try {
     const { status, reason } = req.body;
 
@@ -582,14 +214,12 @@ router.patch("/submissions/:id/status", requireAdmin, async (req, res) => {
         .json({ errors: [{ msg: "Submission already processed" }] });
     }
 
-    submission.status = status;
-    submission.reviewedBy = req.adminId;
-    submission.reviewedAt = new Date();
+    const reviewed = await reviewSubmission(submission._id, req.userId, status === 'approved', reason);
+    const contributor = submission.userId;
+    Object.assign(submission, reviewed.toObject());
+    submission.userId = contributor;
 
-    if (status === "rejected") {
-      submission.rejectionReason = reason;
-      await submission.save();
-
+    if (status === 'rejected') {
       const userEmail = submission.userId?.email;
       const userName = submission.userId?.name || "User";
 
@@ -614,37 +244,6 @@ router.patch("/submissions/:id/status", requireAdmin, async (req, res) => {
     }
 
     if (status === "approved") {
-      const approvedContent = new ApprovedContent({
-        submissionId: submission._id,
-        userId: submission.userId,
-        country: submission.country,
-        stateRegion: submission.stateRegion,
-        tribe: submission.tribe,
-        village: submission.village,
-        culturalDomain: submission.culturalDomain,
-        title: submission.title,
-        description: submission.description,
-        keywords: submission.keywords,
-        language: submission.language,
-        dateOfRecording: submission.dateOfRecording,
-        culturalSignificance: submission.culturalSignificance,
-        contentFileType: submission.contentFileType,
-        contentUrl: submission.contentUrl,
-        contentCloudinaryId: submission.contentCloudinaryId,
-        consent: submission.consent,
-        accessTier: submission.accessTier,
-        contentWarnings: submission.contentWarnings,
-        warningOtherText: submission.warningOtherText,
-        translationFileUrl: submission.translationFileUrl,
-        backgroundInfo: submission.backgroundInfo,
-        verificationDocUrl: submission.verificationDocUrl,
-        approvedBy: req.adminId,
-        approvedAt: new Date(),
-      });
-
-      await approvedContent.save();
-      await submission.save();
-
       const userEmail = submission.userId?.email;
       const userName = submission.userId?.name || "User";
 
@@ -668,12 +267,12 @@ router.patch("/submissions/:id/status", requireAdmin, async (req, res) => {
     }
   } catch (error) {
     console.error("Update status error:", error);
-    res.status(500).json({ errors: [{ msg: "Failed to update status" }] });
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ errors: [{ msg: "Failed to update status" }] });
   }
 });
 
 // ===== Delete Submission =====
-router.delete("/submissions/:id", requireAdmin, async (req, res) => {
+router.delete("/submissions/:id", requireAuth, requirePermission(PERMISSIONS.SUBMISSION_DELETE_ANY), async (req, res) => {
   try {
     const submission = await Submission.findById(req.params.id).populate(
       "userId",
@@ -743,25 +342,32 @@ router.delete("/submissions/:id", requireAdmin, async (req, res) => {
     res.json({ message: "Submission deleted successfully" });
   } catch (error) {
     console.error("Delete submission error:", error);
-    res.status(500).json({ errors: [{ msg: "Failed to delete submission" }] });
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ errors: [{ msg: "Failed to delete submission" }] });
   }
 });
 
 // ===== Users Management =====
-router.get("/users", requireAdmin, async (req, res) => {
+router.get("/users", requireAuth, requirePermission(PERMISSIONS.USER_VIEW_ANY), async (req, res) => {
   try {
     const { page = 1, limit = 20, search = "", role = "" } = req.query;
 
     const query = {};
     if (search) {
-      query.$or = [
+      const orConditions = [
         { name: { $regex: search, $options: "i" } },
         { email: { $regex: search, $options: "i" } },
-        { tribe: { $regex: search, $options: "i" } },
       ];
+      const tribeMatches = await UserDetails.find({
+        tribe: { $regex: search, $options: "i" },
+      }).select("user");
+      if (tribeMatches.length) {
+        orConditions.push({ _id: { $in: tribeMatches.map((d) => d.user) } });
+      }
+      query.$or = orConditions;
     }
     if (role) {
-      query.role = role;
+      const roleDoc = await Role.findOne({ name: role }).select("_id");
+      query.role = roleDoc ? roleDoc._id : null;
     }
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
@@ -769,14 +375,17 @@ router.get("/users", requireAdmin, async (req, res) => {
     const [users, total] = await Promise.all([
       User.find(query)
         .select("-password")
+        .populate("role", "name")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(parseInt(limit)),
       User.countDocuments(query),
     ]);
 
+    const usersWithDetails = await mergeUsersWithDetails(users);
+
     res.json({
-      users,
+      users: usersWithDetails,
       pagination: {
         total,
         page: parseInt(page),
@@ -786,21 +395,21 @@ router.get("/users", requireAdmin, async (req, res) => {
     });
   } catch (error) {
     console.error("Fetch users error:", error);
-    res.status(500).json({ errors: [{ msg: "Failed to fetch users" }] });
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ errors: [{ msg: "Failed to fetch users" }] });
   }
 });
 
 // ===== Get Single User Details =====
-router.get("/users/:id", requireAdmin, async (req, res) => {
+router.get("/users/:id", requireAuth, requirePermission(PERMISSIONS.USER_VIEW_ANY), async (req, res) => {
   try {
-    const user = await User.findById(req.params.id).select("-password");
+    const user = await User.findById(req.params.id).select("-password").populate("role", "name");
 
     if (!user) {
       return res.status(404).json({ errors: [{ msg: "User not found" }] });
     }
 
     // Get user's submissions
-    const [submissions, approvedCount, pendingCount, rejectedCount] =
+    const [submissions, approvedCount, pendingCount, rejectedCount, details] =
       await Promise.all([
         Submission.find({ userId: user._id })
           .sort({ createdAt: -1 })
@@ -809,10 +418,11 @@ router.get("/users/:id", requireAdmin, async (req, res) => {
         Submission.countDocuments({ userId: user._id, status: "approved" }),
         Submission.countDocuments({ userId: user._id, status: "pending" }),
         Submission.countDocuments({ userId: user._id, status: "rejected" }),
+        UserDetails.findOne({ user: user._id }),
       ]);
 
     res.json({
-      user,
+      user: mergeUserWithDetails(user, details),
       stats: {
         totalSubmissions: submissions.length,
         approved: approvedCount,
@@ -823,38 +433,44 @@ router.get("/users/:id", requireAdmin, async (req, res) => {
     });
   } catch (error) {
     console.error("Fetch user error:", error);
-    res.status(500).json({ errors: [{ msg: "Failed to fetch user" }] });
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ errors: [{ msg: "Failed to fetch user" }] });
   }
 });
 
 // ===== Update User Role =====
-router.patch("/users/:id/role", requireAdmin, async (req, res) => {
+router.patch("/users/:id/role", requireAuth, requirePermission(PERMISSIONS.USER_UPDATE_ROLE), async (req, res) => {
   try {
     const { role } = req.body;
 
-    if (!["Custodian", "Researcher", "Contributor", "Viewer"].includes(role)) {
+    const roleDoc = await Role.findOne({ name: role });
+    if (!roleDoc) {
       return res.status(400).json({ errors: [{ msg: "Invalid role" }] });
     }
 
     const user = await User.findByIdAndUpdate(
       req.params.id,
-      { role },
-      { new: true, select: "-password" }
-    );
+      { role: roleDoc._id },
+      { new: true, runValidators: true, select: "-password" }
+    ).populate("role", "name");
 
     if (!user) {
       return res.status(404).json({ errors: [{ msg: "User not found" }] });
     }
 
-    res.json({ message: "User role updated successfully", user });
+    const details = await UserDetails.findOne({ user: user._id });
+
+    res.json({
+      message: "User role updated successfully",
+      user: mergeUserWithDetails(user, details),
+    });
   } catch (error) {
     console.error("Update user role error:", error);
-    res.status(500).json({ errors: [{ msg: "Failed to update user role" }] });
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ errors: [{ msg: "Failed to update user role" }] });
   }
 });
 
 // ===== Delete User =====
-router.delete("/users/:id", requireAdmin, async (req, res) => {
+router.delete("/users/:id", requireAuth, requirePermission(PERMISSIONS.USER_DELETE_ANY), async (req, res) => {
   try {
     const user = await User.findById(req.params.id);
 
@@ -879,12 +495,151 @@ router.delete("/users/:id", requireAdmin, async (req, res) => {
     }
 
     await Submission.deleteMany({ userId: user._id });
+    await UserDetails.findOneAndDelete({ user: user._id });
     await User.findByIdAndDelete(user._id);
 
     res.json({ message: "User and associated data deleted successfully" });
   } catch (error) {
     console.error("Delete user error:", error);
-    res.status(500).json({ errors: [{ msg: "Failed to delete user" }] });
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ errors: [{ msg: "Failed to delete user" }] });
+  }
+});
+
+// ===== Roles & Permissions Management =====
+
+// Permissions are code-defined (constants/permissions.js) and seeded via
+// scripts/seed-rbac.js - this only lists what already exists, it doesn't
+// create new ones.
+router.get("/permissions", requireAuth, requirePermission(PERMISSIONS.ROLE_MANAGE), async (req, res) => {
+  try {
+    const permissions = await Permission.find().sort({ name: 1 });
+    res.json({ permissions });
+  } catch (error) {
+    console.error("Fetch permissions error:", error);
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ errors: [{ msg: "Failed to fetch permissions" }] });
+  }
+});
+
+router.get("/roles", requireAuth, requirePermission(PERMISSIONS.ROLE_MANAGE), async (req, res) => {
+  try {
+    const [roles, mappings, userCounts] = await Promise.all([
+      Role.find().sort({ name: 1 }),
+      RolePermission.find().populate("permission", "name description"),
+      User.aggregate([{ $group: { _id: "$role", count: { $sum: 1 } } }]),
+    ]);
+
+    const permissionsByRole = new Map();
+    for (const mapping of mappings) {
+      if (!mapping.permission) continue;
+      const key = mapping.role.toString();
+      if (!permissionsByRole.has(key)) permissionsByRole.set(key, []);
+      permissionsByRole.get(key).push({
+        _id: mapping.permission._id,
+        name: mapping.permission.name,
+        description: mapping.permission.description,
+      });
+    }
+
+    const userCountByRole = new Map(
+      userCounts.filter((c) => c._id).map((c) => [c._id.toString(), c.count])
+    );
+
+    const rolesWithPermissions = roles.map((role) => ({
+      _id: role._id,
+      name: role.name,
+      description: role.description,
+      permissions: permissionsByRole.get(role._id.toString()) || [],
+      userCount: userCountByRole.get(role._id.toString()) || 0,
+    }));
+
+    res.json({ roles: rolesWithPermissions });
+  } catch (error) {
+    console.error("Fetch roles error:", error);
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ errors: [{ msg: "Failed to fetch roles" }] });
+  }
+});
+
+router.post("/roles", requireAuth, requirePermission(PERMISSIONS.ROLE_MANAGE), async (req, res) => {
+  try {
+    const { name, description } = req.body;
+    if (!name || !name.trim()) {
+      return res.status(400).json({ errors: [{ msg: "Role name is required" }] });
+    }
+
+    const role = await Role.create({ name: name.trim(), description });
+    res.status(201).json({ role: { ...role.toObject(), permissions: [], userCount: 0 } });
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(400).json({ errors: [{ msg: "A role with that name already exists" }] });
+    }
+    console.error("Create role error:", error);
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ errors: [{ msg: "Failed to create role" }] });
+  }
+});
+
+// Replace the full set of permissions granted to a role.
+router.patch("/roles/:id/permissions", requireAuth, requirePermission(PERMISSIONS.ROLE_MANAGE), async (req, res) => {
+  try {
+    const { permissionIds } = req.body;
+    if (!Array.isArray(permissionIds)) {
+      return res.status(400).json({ errors: [{ msg: "permissionIds must be an array" }] });
+    }
+
+    const role = await Role.findById(req.params.id);
+    if (!role) {
+      return res.status(404).json({ errors: [{ msg: "Role not found" }] });
+    }
+
+    const validPermissions = await Permission.find({ _id: { $in: permissionIds } }).select("_id");
+    const validIds = validPermissions.map((p) => p._id);
+
+    await RolePermission.deleteMany({ role: role._id });
+    if (validIds.length) {
+      await RolePermission.insertMany(
+        validIds.map((permissionId) => ({ role: role._id, permission: permissionId })),
+        { ordered: false }
+      );
+    }
+
+    const mappings = await RolePermission.find({ role: role._id }).populate("permission", "name description");
+
+    res.json({
+      role: {
+        _id: role._id,
+        name: role.name,
+        description: role.description,
+        permissions: mappings
+          .filter((m) => m.permission)
+          .map((m) => ({ _id: m.permission._id, name: m.permission.name, description: m.permission.description })),
+      },
+    });
+  } catch (error) {
+    console.error("Update role permissions error:", error);
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ errors: [{ msg: "Failed to update role permissions" }] });
+  }
+});
+
+router.delete("/roles/:id", requireAuth, requirePermission(PERMISSIONS.ROLE_MANAGE), async (req, res) => {
+  try {
+    const role = await Role.findById(req.params.id);
+    if (!role) {
+      return res.status(404).json({ errors: [{ msg: "Role not found" }] });
+    }
+
+    const usersWithRole = await User.countDocuments({ role: role._id });
+    if (usersWithRole > 0) {
+      return res.status(400).json({
+        errors: [{ msg: `Cannot delete role - ${usersWithRole} user(s) still have it` }],
+      });
+    }
+
+    await RolePermission.deleteMany({ role: role._id });
+    await Role.findByIdAndDelete(role._id);
+
+    res.json({ message: "Role deleted successfully" });
+  } catch (error) {
+    console.error("Delete role error:", error);
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ errors: [{ msg: "Failed to delete role" }] });
   }
 });
 
@@ -892,7 +647,7 @@ router.delete("/users/:id", requireAdmin, async (req, res) => {
 
 
 // ===== GET /api/admin/amendments - Get all amendment requests =====
-router.get("/amendments", requireAdmin, async (req, res) => {
+router.get("/amendments", requireAuth, requirePermission(PERMISSIONS.AMENDMENT_VIEW_ANY), async (req, res) => {
   try {
     const { status = 'pending', page = 1, limit = 20 } = req.query;
 
@@ -901,7 +656,7 @@ router.get("/amendments", requireAdmin, async (req, res) => {
 
     const [amendments, total] = await Promise.all([
       AmendmentRequest.find(query)
-        .populate('userId', 'name email avatar country tribe')
+        .populate('userId', 'name email')
         .populate('submissionId', 'title status')
         .populate('approvedContentId', 'title currentVersion')
         .populate('reviewedBy', 'name email')
@@ -911,8 +666,14 @@ router.get("/amendments", requireAdmin, async (req, res) => {
       AmendmentRequest.countDocuments(query)
     ]);
 
-    res.json({
+    const amendmentsWithDetails = await attachUserDetails(
       amendments,
+      'userId',
+      ['avatar', 'country', 'tribe']
+    );
+
+    res.json({
+      amendments: amendmentsWithDetails,
       pagination: {
         total,
         page: parseInt(page),
@@ -922,15 +683,19 @@ router.get("/amendments", requireAdmin, async (req, res) => {
     });
   } catch (error) {
     console.error('Fetch amendments error:', error);
-    res.status(500).json({ errors: [{ msg: 'Failed to fetch amendments' }] });
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ errors: [{ msg: 'Failed to fetch amendments' }] });
   }
 });
 
 // ===== GET /api/admin/amendments/:id - Get amendment details with comparison =====
-router.get("/amendments/:id", requireAdmin, async (req, res) => {
+router.get("/amendments/:id", requireAuth, requirePermission(PERMISSIONS.AMENDMENT_VIEW_ANY), async (req, res) => {
   try {
     const amendment = await AmendmentRequest.findById(req.params.id)
-      .populate('userId', 'name email avatar role country tribe village')
+      .populate({
+        path: 'userId',
+        select: 'name email role',
+        populate: { path: 'role', select: 'name' }
+      })
       .populate('submissionId')
       .populate('approvedContentId')
       .populate('reviewedBy', 'name email');
@@ -938,6 +703,12 @@ router.get("/amendments/:id", requireAdmin, async (req, res) => {
     if (!amendment) {
       return res.status(404).json({ errors: [{ msg: 'Amendment not found' }] });
     }
+
+    const amendmentWithDetails = await attachUserDetails(
+      amendment,
+      'userId',
+      ['avatar', 'country', 'tribe', 'village']
+    );
 
     // Prepare side-by-side comparison
     const comparison = {
@@ -960,18 +731,18 @@ router.get("/amendments/:id", requireAdmin, async (req, res) => {
       summary: amendment.changesSummary
     };
 
-    res.json({ 
-      amendment, 
-      comparison 
+    res.json({
+      amendment: amendmentWithDetails,
+      comparison
     });
   } catch (error) {
     console.error('Fetch amendment error:', error);
-    res.status(500).json({ errors: [{ msg: 'Failed to fetch amendment' }] });
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ errors: [{ msg: 'Failed to fetch amendment' }] });
   }
 });
 
 // ===== PATCH /api/admin/amendments/:id/review - Approve or reject amendment =====
-router.patch("/amendments/:id/review", requireAdmin, async (req, res) => {
+router.patch("/amendments/:id/review", requireAuth, requirePermission(PERMISSIONS.AMENDMENT_REVIEW), async (req, res) => {
   try {
     const { approved, reviewNotes } = req.body;
 
@@ -994,89 +765,11 @@ router.patch("/amendments/:id/review", requireAdmin, async (req, res) => {
     const userName = amendment.userId?.name || 'User';
     const submission = amendment.submissionId;
 
+    if (typeof approved !== 'boolean') return res.status(400).json({ errors: [{ msg: 'approved must be a boolean' }] });
+    const reviewed = await reviewAmendment(amendment._id, req.userId, approved, reviewNotes);
+    Object.assign(amendment, reviewed.toObject());
+
     if (approved) {
-      // ✅ APPROVE AMENDMENT
-      console.log(`✅ Approving amendment - v${amendment.previousVersionNumber} → v${amendment.versionNumber}`);
-
-      // Case 1: Amending APPROVED content
-      if (amendment.approvedContentId) {
-        const approvedContent = await ApprovedContent.findById(amendment.approvedContentId);
-
-        if (!approvedContent) {
-          return res.status(404).json({ 
-            errors: [{ msg: 'Approved content not found' }] 
-          });
-        }
-
-        // Delete old files if replaced
-        const filesToDelete = [];
-        if (amendment.proposedChanges.contentCloudinaryId !== amendment.currentApprovedSnapshot.contentCloudinaryId) {
-          filesToDelete.push(amendment.currentApprovedSnapshot.contentCloudinaryId);
-        }
-        if (amendment.proposedChanges.translationCloudinaryId !== amendment.currentApprovedSnapshot.translationCloudinaryId) {
-          filesToDelete.push(amendment.currentApprovedSnapshot.translationCloudinaryId);
-        }
-        if (amendment.proposedChanges.verificationCloudinaryId !== amendment.currentApprovedSnapshot.verificationCloudinaryId) {
-          filesToDelete.push(amendment.currentApprovedSnapshot.verificationCloudinaryId);
-        }
-
-        // Delete old files from Cloudinary
-        for (const fileId of filesToDelete) {
-          if (fileId) {
-            await cloudinary.uploader.destroy(fileId).catch(err => {
-              console.log('⚠️  Failed to delete old file:', fileId);
-            });
-          }
-        }
-
-        // Apply all proposed changes to approved content
-        Object.assign(approvedContent, amendment.proposedChanges);
-        
-        // Update version tracking
-        approvedContent.currentVersion = amendment.versionNumber;
-        approvedContent.totalAmendments = (approvedContent.totalAmendments || 0) + 1;
-        approvedContent.lastAmendmentDate = new Date();
-        approvedContent.updatedAt = new Date();
-
-        await approvedContent.save();
-
-        console.log(`✅ Approved content updated to v${amendment.versionNumber}`);
-      }
-      // Case 2: Approving PENDING submission (first approval)
-      else {
-        // Create new approved content
-        const approvedContent = new ApprovedContent({
-          submissionId: submission._id,
-          userId: amendment.userId._id,
-          ...amendment.proposedChanges,
-          currentVersion: 1,
-          totalAmendments: 0,
-          approvedBy: req.adminId,
-          approvedAt: new Date()
-        });
-
-        await approvedContent.save();
-
-        // Update submission
-        submission.status = 'approved';
-        submission.approvedAt = new Date();
-        submission.reviewedBy = req.adminId;
-        submission.reviewedAt = new Date();
-
-        await submission.save();
-
-        console.log('✅ First approval - Approved content created');
-      }
-
-      // Update amendment status
-      amendment.status = 'approved';
-      amendment.reviewedBy = req.adminId;
-      amendment.reviewedAt = new Date();
-      amendment.approvedAt = new Date();
-      amendment.reviewNotes = reviewNotes;
-
-      await amendment.save();
-
       // Send approval email
       if (userEmail) {
         await sendMail({
@@ -1106,33 +799,7 @@ router.patch("/amendments/:id/review", requireAdmin, async (req, res) => {
       // ❌ REJECT AMENDMENT
       console.log(`❌ Rejecting amendment - Staying at v${amendment.previousVersionNumber}`);
 
-      // Delete newly uploaded files from Cloudinary
-      const filesToDelete = [];
-      if (amendment.proposedChanges.contentCloudinaryId !== amendment.currentApprovedSnapshot.contentCloudinaryId) {
-        filesToDelete.push(amendment.proposedChanges.contentCloudinaryId);
-      }
-      if (amendment.proposedChanges.translationCloudinaryId !== amendment.currentApprovedSnapshot.translationCloudinaryId) {
-        filesToDelete.push(amendment.proposedChanges.translationCloudinaryId);
-      }
-      if (amendment.proposedChanges.verificationCloudinaryId !== amendment.currentApprovedSnapshot.verificationCloudinaryId) {
-        filesToDelete.push(amendment.proposedChanges.verificationCloudinaryId);
-      }
-
-      for (const fileId of filesToDelete) {
-        if (fileId) {
-          await cloudinary.uploader.destroy(fileId).catch(() => {});
-        }
-      }
-
-      // Update amendment status
-      amendment.status = 'rejected';
-      amendment.reviewedBy = req.adminId;
-      amendment.reviewedAt = new Date();
-      amendment.rejectedAt = new Date();
-      amendment.reviewNotes = reviewNotes;
-      amendment.rejectionReason = reviewNotes;
-
-      await amendment.save();
+      // Rejected proposal media remains available in revision history.
 
       // Send rejection email
       if (userEmail) {
@@ -1163,7 +830,7 @@ router.patch("/amendments/:id/review", requireAdmin, async (req, res) => {
 
   } catch (error) {
     console.error('❌ Review amendment error:', error);
-    res.status(500).json({ 
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ 
       errors: [{ 
         msg: 'Failed to review amendment', 
         detail: error.message 

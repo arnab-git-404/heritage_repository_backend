@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "seed:taxonomy": "node ./scripts/seed-taxonomy.js"
+    "seed:taxonomy": "node ./scripts/seed-taxonomy.js",
+    "seed:rbac": "node ./scripts/seed-rbac.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

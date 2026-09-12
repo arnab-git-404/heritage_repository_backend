@@ -3,6 +3,8 @@
 import mongoose from 'mongoose';
 
 const approvedContentSchema = new mongoose.Schema({
+  revisionId: { type: mongoose.Schema.Types.ObjectId, ref: 'SubmissionRevision' },
+  ethicsAgreed: Boolean,
   // Reference to original submission
   submissionId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -50,6 +52,7 @@ const approvedContentSchema = new mongoose.Schema({
   consent: {
     fileType: String,
     fileUrl: String,
+    fileCloudinaryId: String,
     consentType: String,
     consentNames: String,
     consentDate: Date,
@@ -94,7 +97,8 @@ const approvedContentSchema = new mongoose.Schema({
     default: Date.now
   }
 }, {
-  timestamps: true
+  timestamps: true,
+  optimisticConcurrency: true
 });
 
 // Indexes for search and filtering

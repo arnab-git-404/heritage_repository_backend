@@ -11,6 +11,7 @@ const consentSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  fileCloudinaryId: String,
   consentType: {
     type: String,
     enum: ['Individual Consent', 'Collective / Community Consent', 'Custodian Consent'],
@@ -37,6 +38,30 @@ const consentSchema = new mongoose.Schema({
 });
 
 const submissionSchema = new mongoose.Schema({
+  revisionId: { type: mongoose.Schema.Types.ObjectId, ref: 'SubmissionRevision' },
+  revisionSequence: { type: Number, default: 0 },
+  historyLock: {
+    type: new mongoose.Schema({ token: String, startedAt: Date }, { _id: false }),
+    select: false,
+  },
+  pendingReview: {
+    type: new mongoose.Schema({
+      operationId: { type: mongoose.Schema.Types.ObjectId, required: true },
+      kind: { type: String, enum: ['submission', 'amendment'], required: true },
+      amendmentId: { type: mongoose.Schema.Types.ObjectId, ref: 'AmendmentRequest' },
+      reviewerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+      approved: { type: Boolean, required: true },
+      reason: String,
+      revisionId: { type: mongoose.Schema.Types.ObjectId, ref: 'SubmissionRevision', required: true },
+      publicationId: { type: mongoose.Schema.Types.ObjectId, ref: 'ApprovedContent', required: true },
+      publicationVersion: { type: Number, required: true },
+      totalAmendments: { type: Number, required: true },
+      reviewedAt: { type: Date, required: true },
+      restorePublished: Boolean,
+      submissionStatus: { type: String, enum: ['pending', 'approved', 'rejected'], required: true },
+    }, { _id: false }),
+    select: false,
+  },
   // User reference
   userId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -183,7 +208,8 @@ const submissionSchema = new mongoose.Schema({
     default: Date.now
   }
 }, {
-  timestamps: true
+  timestamps: true,
+  optimisticConcurrency: true
 });
 
 // Index for faster queries

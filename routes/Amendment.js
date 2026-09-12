@@ -1,3 +1,6 @@
+import { saveAmendmentWithHistory, cancelAmendment } from '../services/contentHistory.js';
+import { contentSnapshot } from '../models/shared/content.js';
+import { registerUpload } from '../services/mediaAssets.js';
 import express from 'express';
 import multer from 'multer';
 import { v2 as cloudinary } from 'cloudinary';
@@ -30,7 +33,7 @@ const upload = multer({
   }
 });
 
-async function uploadToCloudinary(buffer, folder = 'amendments', originalFilename = '') {
+async function uploadToCloudinary(buffer, folder = 'amendments', originalFilename = '', ownerId, mimeType) {
   return new Promise((resolve, reject) => {
     // Detect file type
     const isPdf = originalFilename.toLowerCase().endsWith('.pdf');
@@ -52,35 +55,19 @@ async function uploadToCloudinary(buffer, folder = 'amendments', originalFilenam
           console.log('✅ Uploaded to Cloudinary:', result.secure_url);
           resolve({
             public_id: result.public_id,
-            secure_url: result.secure_url
+            secure_url: result.secure_url,
+            resource_type: result.resource_type, bytes: result.bytes
           });
         }
       }
     );
 
     streamifier.createReadStream(buffer).pipe(uploadStream);
+  }).then(async result => {
+    await registerUpload(ownerId, result, { originalname: originalFilename, mimetype: mimeType, buffer, size: buffer.length });
+    return result;
   });
 }
-
-
-// Helper function to upload to Cloudinary
-// async function uploadToCloudinary(buffer, folder = 'amendments', originalFilename = '') {
-//   return new Promise((resolve, reject) => {
-//     const uploadStream = cloudinary.uploader.upload_stream(
-//       {
-//         folder,
-//         resource_type: 'auto',
-//         public_id: `${Date.now()}_${originalFilename}`,
-//       },
-//       (error, result) => {
-//         if (error) reject(error);
-//         else resolve(result);
-//       }
-//     );
-//     uploadStream.end(buffer);
-//   });
-// }
-
 
 // Auth middleware
 function requireAuth(req, res, next) {
@@ -111,90 +98,16 @@ function getChangeType(value) {
 }
 
 // Helper to track changes
-// function getChangedFields(oldData, newData, requestBody) {
-//   const changes = [];
-//   const fieldsToCheck = [
-//     'country', 'stateRegion', 'tribe', 'village', 'culturalDomain',
-//     'title', 'description', 'keywords', 'language', 'dateOfRecording',
-//     'culturalSignificance', 'contentFileType', 'accessTier', 
-//     'contentWarnings', 'warningOtherText', 'backgroundInfo'
-//   ];
-
-//   fieldsToCheck.forEach(field => {
-//     if (requestBody.hasOwnProperty(field) || requestBody[field] !== undefined) {
-//       const newValue = newData[field];
-//       const oldValue = oldData[field];
-      
-//       const oldStr = JSON.stringify(oldValue);
-//       const newStr = JSON.stringify(newValue);
-      
-//       if (oldStr !== newStr) {
-//         changes.push({
-//           fieldName: field,
-//           oldValue: oldValue,
-//           newValue: newValue,
-//           changeType: getChangeType(newValue)
-//         });
-//       }
-//     }
-//   });
-
-//   // Check file changes
-//   if (newData.contentCloudinaryId !== oldData.contentCloudinaryId) {
-//     changes.push({
-//       fieldName: 'contentFile',
-//       oldValue: oldData.contentUrl,
-//       newValue: newData.contentUrl,
-//       changeType: 'file'
-//     });
-//   }
-
-//   if (newData.translationCloudinaryId !== oldData.translationCloudinaryId) {
-//     changes.push({
-//       fieldName: 'translationFile',
-//       oldValue: oldData.translationFileUrl,
-//       newValue: newData.translationFileUrl,
-//       changeType: 'file'
-//     });
-//   }
-
-//   if (newData.verificationCloudinaryId !== oldData.verificationCloudinaryId) {
-//     changes.push({
-//       fieldName: 'verificationDoc',
-//       oldValue: oldData.verificationDocUrl,
-//       newValue: newData.verificationDocUrl,
-//       changeType: 'file'
-//     });
-//   }
-
-//   // Check consent changes
-//   const oldConsent = JSON.stringify(oldData.consent);
-//   const newConsent = JSON.stringify(newData.consent);
-//   if (oldConsent !== newConsent) {
-//     changes.push({
-//       fieldName: 'consent',
-//       oldValue: oldData.consent,
-//       newValue: newData.consent,
-//       changeType: 'object'
-//     });
-//   }
-
-//   return changes;
-// }
-
-
-// Helper to track changes - SIMPLEST VERSION
 function getChangedFields(oldData, newData, requestBody) {
   const changes = [];
   const fieldsToCheck = [
     'country', 'stateRegion', 'tribe', 'village', 'culturalDomain',
     'title', 'description', 'keywords', 'language', 'dateOfRecording',
-    'culturalSignificance', 'contentFileType', 'accessTier', 
+    'culturalSignificance', 'contentFileType', 'accessTier',
     'contentWarnings', 'warningOtherText', 'backgroundInfo'
   ];
 
   fieldsToCheck.forEach(field => {
-    // ✅ SIMPLEST: Just check if field exists and is not undefined
     if (requestBody[field] !== undefined) {
       const newValue = newData[field];
       const oldValue = oldData[field];
@@ -335,36 +248,12 @@ router.post('/', requireAuth, upload.fields([
     }
 
     // Create snapshot of current data
-    const currentSnapshot = {
-      country: sourceData.country,
-      stateRegion: sourceData.stateRegion,
-      tribe: sourceData.tribe,
-      village: sourceData.village,
-      culturalDomain: sourceData.culturalDomain,
-      title: sourceData.title,
-      description: sourceData.description,
-      keywords: sourceData.keywords,
-      language: sourceData.language,
-      dateOfRecording: sourceData.dateOfRecording,
-      culturalSignificance: sourceData.culturalSignificance,
-      contentFileType: sourceData.contentFileType,
-      contentUrl: sourceData.contentUrl,
-      contentCloudinaryId: sourceData.contentCloudinaryId,
-      consent: { ...sourceData.consent },
-      accessTier: sourceData.accessTier,
-      contentWarnings: sourceData.contentWarnings,
-      warningOtherText: sourceData.warningOtherText,
-      translationFileUrl: sourceData.translationFileUrl,
-      translationCloudinaryId: sourceData.translationCloudinaryId,
-      backgroundInfo: sourceData.backgroundInfo,
-      verificationDocUrl: sourceData.verificationDocUrl,
-      verificationCloudinaryId: sourceData.verificationCloudinaryId
-    };
+    const currentSnapshot = contentSnapshot(sourceData);
 
     console.log('💾 Current version snapshot created');
 
     // Merge with new changes
-    const proposedChanges = { ...currentSnapshot };
+    const proposedChanges = structuredClone(currentSnapshot);
 
     const {
       country, stateRegion, tribe, village, culturalDomain, title,
@@ -413,7 +302,7 @@ router.post('/', requireAuth, upload.fields([
       const contentResult = await uploadToCloudinary(
         file.buffer,
         `amendments/${req.userId}/content`,
-        file.originalname
+        file.originalname, req.userId, file.mimetype
       );
       proposedChanges.contentUrl = contentResult.secure_url;
       proposedChanges.contentCloudinaryId = contentResult.public_id;
@@ -426,9 +315,10 @@ router.post('/', requireAuth, upload.fields([
       const consentResult = await uploadToCloudinary(
         file.buffer,
         `amendments/${req.userId}/consent`,
-        file.originalname
+        file.originalname, req.userId, file.mimetype
       );
       proposedChanges.consent.fileUrl = consentResult.secure_url;
+      proposedChanges.consent.fileCloudinaryId = consentResult.public_id;
       console.log('✅ Consent uploaded');
     }
 
@@ -438,7 +328,7 @@ router.post('/', requireAuth, upload.fields([
       const translationResult = await uploadToCloudinary(
         file.buffer,
         `amendments/${req.userId}/translation`,
-        file.originalname
+        file.originalname, req.userId, file.mimetype
       );
       proposedChanges.translationFileUrl = translationResult.secure_url;
       proposedChanges.translationCloudinaryId = translationResult.public_id;
@@ -451,7 +341,7 @@ router.post('/', requireAuth, upload.fields([
       const verificationResult = await uploadToCloudinary(
         file.buffer,
         `amendments/${req.userId}/verification`,
-        file.originalname
+        file.originalname, req.userId, file.mimetype
       );
       proposedChanges.verificationDocUrl = verificationResult.secure_url;
       proposedChanges.verificationCloudinaryId = verificationResult.public_id;
@@ -485,7 +375,8 @@ router.post('/', requireAuth, upload.fields([
     }
 
     // Calculate new version number
-    const newVersionNumber = currentVersionNumber + 1;
+    const latestAttempt = await AmendmentRequest.findOne({ submissionId: submission._id }).sort({ versionNumber: -1 });
+    const newVersionNumber = Math.max(1, currentVersionNumber, latestAttempt?.versionNumber || 0) + 1;
 
     // Create amendment request
     const amendment = new AmendmentRequest({
@@ -501,7 +392,6 @@ router.post('/', requireAuth, upload.fields([
       status: 'pending'
     });
 
-    await amendment.save();
 
     // Update submission resubmission count
     submission.resubmissionCount = (submission.resubmissionCount || 0) + 1;
@@ -509,7 +399,7 @@ router.post('/', requireAuth, upload.fields([
     if (!submission.originalSubmissionDate) {
       submission.originalSubmissionDate = submission.createdAt;
     }
-    await submission.save();
+    await saveAmendmentWithHistory(amendment, submission);
 
     console.log(`✅ Amendment request created - Will be v${newVersionNumber} if approved`);
 
@@ -531,7 +421,7 @@ router.post('/', requireAuth, upload.fields([
 
   } catch (error) {
     console.error('❌ Amendment request error:', error);
-    res.status(500).json({ 
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ 
       errors: [{ 
         msg: 'Failed to submit amendment request', 
         detail: error.message 
@@ -560,7 +450,7 @@ router.get('/my', requireAuth, async (req, res) => {
     res.json(amendments);
   } catch (error) {
     console.error('❌ Fetch amendments error:', error);
-    res.status(500).json({ 
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ 
       errors: [{ msg: 'Failed to fetch amendment requests' }] 
     });
   }
@@ -604,7 +494,7 @@ router.get('/:id', requireAuth, async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Fetch amendment error:', error);
-    res.status(500).json({ 
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ 
       errors: [{ msg: 'Failed to fetch amendment request' }] 
     });
   }
@@ -627,19 +517,15 @@ router.delete('/:id', requireAuth, async (req, res) => {
       });
     }
 
-    // Delete uploaded files from Cloudinary
-    if (amendment.proposedChanges.contentCloudinaryId !== amendment.currentApprovedSnapshot.contentCloudinaryId) {
-      await cloudinary.uploader.destroy(amendment.proposedChanges.contentCloudinaryId).catch(() => {});
-    }
-
-    await amendment.deleteOne();
+    // Retain the proposal and its media as part of the immutable history.
+    await cancelAmendment(amendment._id, req.userId);
 
     console.log('✅ Amendment request cancelled');
 
     res.json({ message: 'Amendment request cancelled successfully' });
   } catch (error) {
     console.error('❌ Cancel amendment error:', error);
-    res.status(500).json({ 
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ 
       errors: [{ msg: 'Failed to cancel amendment request' }] 
     });
   }
@@ -685,7 +571,7 @@ router.get('/submission/:submissionId/versions', requireAuth, async (req, res) =
     });
   } catch (error) {
     console.error('❌ Fetch version history error:', error);
-    res.status(500).json({ 
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ 
       errors: [{ msg: 'Failed to fetch version history' }] 
     });
   }

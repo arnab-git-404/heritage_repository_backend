@@ -2,7 +2,11 @@ import express from 'express';
 import { body, validationResult } from 'express-validator';
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
+import UserDetails from '../models/UserDetails.js';
+import Role from '../models/Role.js';
 import Submission from '../models/Submission.js';
+import { mergeUserWithDetails } from '../utils/userDetails.js';
+import { DEFAULT_ROLE } from '../constants/roles.js';
 import crypto from 'crypto';
 import { sendMail } from '../utils/mailer.js';
 import multer from 'multer';
@@ -67,15 +71,30 @@ router.post(
         return res.status(400).json({ errors: [{ msg: 'User already exists' }] });
       }
 
+      const defaultRole = await Role.findOne({ name: DEFAULT_ROLE });
+      if (!defaultRole) {
+        console.error(`Default role "${DEFAULT_ROLE}" not found - run "npm run seed:rbac" first`);
+        return res.status(500).json({ errors: [{ msg: 'Server misconfiguration: roles not seeded' }] });
+      }
+
       // Create new user
       user = new User({
         name,
         email,
-        password
+        password,
+        role: defaultRole._id
       });
 
       // Save user to database
       await user.save();
+
+      // Create the accompanying profile-details record
+      try {
+        await UserDetails.create({ user: user._id });
+      } catch (detailsErr) {
+        await User.findByIdAndDelete(user._id);
+        throw detailsErr;
+      }
 
       // Create JWT
       const payload = {
@@ -310,10 +329,13 @@ router.get('/me', requireAuth, async (req, res) => {
   try {
 
     await dbConnect();
-    const user = await User.findById(req.userId).select('-password -resetPasswordToken -resetPasswordExpires');
+    const user = await User.findById(req.userId)
+      .select('-password -resetPasswordToken -resetPasswordExpires')
+      .populate('role', 'name');
     if (!user) return res.status(404).json({ errors: [{ msg: 'User not found' }] });
-    res.json({ user });
-    
+    const details = await UserDetails.findOne({ user: user._id });
+    res.json({ user: mergeUserWithDetails(user, details) });
+
   } catch (err) {
     res.status(500).json({ errors: [{ msg: 'Server error' }] });
   }
@@ -327,6 +349,7 @@ router.delete('/me', requireAuth, async (req, res) => {
 
     const user = await User.findByIdAndDelete(req.userId);
     if (!user) return res.status(404).json({ errors: [{ msg: 'User not found' }] });
+    await UserDetails.findOneAndDelete({ user: req.userId });
     await Submission.deleteMany({ userId: req.userId });
     res.json({ message: 'Account deleted' });
   } catch (err) {
@@ -336,9 +359,11 @@ router.delete('/me', requireAuth, async (req, res) => {
 
 
 // PATCH /api/auth/profile - Update user profile
+// Note: role is deliberately NOT editable here. Role now drives permissions
+// (see middleware/rbac.js), so changing it is admin-only - PATCH
+// /api/admin/users/:id/role, gated by the user:update_role permission.
 router.patch('/profile', requireAuth, [
   body('name').optional().trim().notEmpty().withMessage('Name cannot be empty'),
-  body('role').optional().isIn(['Custodian', 'Researcher', 'Contributor', 'Viewer']).withMessage('Invalid role'),
   body('country').optional().trim(),
   body('state').optional().trim(),
   body('tribe').optional().trim(),
@@ -352,31 +377,52 @@ router.patch('/profile', requireAuth, [
     if (!errors.isEmpty()) {
       return res.status(400).json({ errors: errors.array() });
     }
-    
-    const { name, role, country, state, tribe, village, bio } = req.body;
-    
-    const updateFields = {};
-    if (name !== undefined) updateFields.name = name;
-    if (role !== undefined) updateFields.role = role;
-    if (country !== undefined) updateFields.country = country;
-    if (state !== undefined) updateFields.state = state;
-    if (tribe !== undefined) updateFields.tribe = tribe;
-    if (village !== undefined) updateFields.village = village;
-    if (bio !== undefined) updateFields.bio = bio;
-    
+
+    const { name, country, state, tribe, village, bio } = req.body;
+
+    const userFields = {};
+    if (name !== undefined) userFields.name = name;
+
+    const detailsFields = {};
+    if (country !== undefined) detailsFields.country = country;
+    if (state !== undefined) detailsFields.state = state;
+    if (tribe !== undefined) detailsFields.tribe = tribe;
+    if (village !== undefined) detailsFields.village = village;
+    if (bio !== undefined) detailsFields.bio = bio;
+
     await dbConnect();
 
-    const updatedUser = await User.findByIdAndUpdate(
-      req.userId,
-      { $set: updateFields },
-      { new: true, runValidators: true, select: '-password -resetPasswordToken -resetPasswordExpires' }
-    );
-    
-    if (!updatedUser) {
-      return res.status(404).json({ errors: [{ msg: 'User not found' }] });
+    let updatedUser = req.userId;
+    if (Object.keys(userFields).length > 0) {
+      updatedUser = await User.findByIdAndUpdate(
+        req.userId,
+        { $set: userFields },
+        { new: true, runValidators: true, select: '-password -resetPasswordToken -resetPasswordExpires' }
+      ).populate('role', 'name');
+      if (!updatedUser) {
+        return res.status(404).json({ errors: [{ msg: 'User not found' }] });
+      }
+    } else {
+      updatedUser = await User.findById(req.userId)
+        .select('-password -resetPasswordToken -resetPasswordExpires')
+        .populate('role', 'name');
+      if (!updatedUser) {
+        return res.status(404).json({ errors: [{ msg: 'User not found' }] });
+      }
     }
-    
-    res.json({ user: updatedUser });
+
+    let details;
+    if (Object.keys(detailsFields).length > 0) {
+      details = await UserDetails.findOneAndUpdate(
+        { user: req.userId },
+        { $set: detailsFields },
+        { new: true, upsert: true, runValidators: true }
+      );
+    } else {
+      details = await UserDetails.findOne({ user: req.userId });
+    }
+
+    res.json({ user: mergeUserWithDetails(updatedUser, details) });
   } catch (error) {
     console.error('Profile update error:', error);
     res.status(500).json({ errors: [{ msg: 'Server error' }] });
@@ -426,19 +472,22 @@ router.post('/avatar', requireAuth, upload.single('avatar'), async (req, res) =>
     
     await dbConnect();
 
-    const updatedUser = await User.findByIdAndUpdate(
-      req.userId,
-      { avatar: result.secure_url },
-      { new: true, select: '-password -resetPasswordToken -resetPasswordExpires' }
-    );
-    
-    if (!updatedUser) {
+    const user = await User.findById(req.userId)
+      .select('-password -resetPasswordToken -resetPasswordExpires')
+      .populate('role', 'name');
+    if (!user) {
       return res.status(404).json({ errors: [{ msg: 'User not found' }] });
     }
 
-    res.json({ 
+    const details = await UserDetails.findOneAndUpdate(
+      { user: req.userId },
+      { avatar: result.secure_url },
+      { new: true, upsert: true }
+    );
+
+    res.json({
       avatarUrl: result.secure_url,
-      user: updatedUser 
+      user: mergeUserWithDetails(user, details)
     });
   } catch (error) {
     console.error('Avatar upload error:', error);

@@ -1,19 +1,24 @@
-
-
-
-
-// TEST V2
+import { saveWithHistory, reviewSubmission } from '../services/contentHistory.js';
+import { contentSnapshot } from '../models/shared/content.js';
+import revisionRoutes from './revisions.js';
+import { registerUpload } from '../services/mediaAssets.js';
 import express from 'express';
 import multer from 'multer';
 import { v2 as cloudinary } from 'cloudinary';
 import jwt from 'jsonwebtoken';
+import mongoose from 'mongoose';
 import Submission from '../models/Submission.js';
+import ApprovedContent from '../models/ApprovedContent.js';
 import streamifier from 'streamifier';
 import dotenv from 'dotenv';
 import { dbConnect } from '../utils/db.js';
-import AmendmentRequest from '../models/AmendmentRequest.js'; 
+import AmendmentRequest from '../models/AmendmentRequest.js';
+import { attachUserDetails } from '../utils/userDetails.js';
+import { requirePermission } from '../middleware/rbac.js';
+import { PERMISSIONS } from '../constants/permissions.js';
 
 const router = express.Router();
+router.use(revisionRoutes);
 
 dotenv.config();
 
@@ -73,7 +78,7 @@ function requireAuth(req, res, next) {
 }
 
 // ✅ FIXED: Helper function with correct parameters
-async function uploadToCloudinary(buffer, folder = 'submissions', originalFilename = '') {
+async function uploadToCloudinary(buffer, folder = 'submissions', originalFilename = '', ownerId, mimeType) {
   return new Promise((resolve, reject) => {
     // Detect file type
     const isPdf = originalFilename.toLowerCase().endsWith('.pdf');
@@ -95,13 +100,17 @@ async function uploadToCloudinary(buffer, folder = 'submissions', originalFilena
           console.log('✅ Uploaded to Cloudinary:', result.secure_url);
           resolve({
             public_id: result.public_id,
-            secure_url: result.secure_url
+            secure_url: result.secure_url,
+            resource_type: result.resource_type, bytes: result.bytes
           });
         }
       }
     );
 
     streamifier.createReadStream(buffer).pipe(uploadStream);
+  }).then(async result => {
+    await registerUpload(ownerId, result, { originalname: originalFilename, mimetype: mimeType, buffer, size: buffer.length });
+    return result;
   });
 }
 
@@ -155,7 +164,7 @@ router.post('/', requireAuth, upload.fields([
         const contentResult = await uploadToCloudinary(
           file.buffer,
           `submissions/${req.userId}/content`,
-          file.originalname
+          file.originalname, req.userId, file.mimetype
         );
         
         contentUrl = contentResult.secure_url;
@@ -163,7 +172,7 @@ router.post('/', requireAuth, upload.fields([
         console.log('✅ Content uploaded:', contentUrl);
       } catch (error) {
         console.error('❌ Content upload failed:', error);
-        return res.status(500).json({ 
+        return res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ 
           errors: [{ msg: 'Failed to upload content file: ' + error.message }] 
         });
       }
@@ -174,6 +183,7 @@ router.post('/', requireAuth, upload.fields([
     // Upload consent file
     console.log('⬆️  Uploading consent file...');
     let consentFileUrl = '';
+    let consentCloudinaryId = '';
     
     if (req.files?.consentFile?.[0]) {
       try {
@@ -183,14 +193,15 @@ router.post('/', requireAuth, upload.fields([
         const consentResult = await uploadToCloudinary(
           file.buffer,
           `submissions/${req.userId}/consent`,
-          file.originalname
+          file.originalname, req.userId, file.mimetype
         );
         
         consentFileUrl = consentResult.secure_url;
+        consentCloudinaryId = consentResult.public_id;
         console.log('✅ Consent uploaded:', consentFileUrl);
       } catch (error) {
         console.error('❌ Consent upload failed:', error);
-        return res.status(500).json({ 
+        return res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ 
           errors: [{ msg: 'Failed to upload consent file: ' + error.message }] 
         });
       }
@@ -208,7 +219,7 @@ router.post('/', requireAuth, upload.fields([
         const translationResult = await uploadToCloudinary(
           file.buffer,
           `submissions/${req.userId}/translation`,
-          file.originalname
+          file.originalname, req.userId, file.mimetype
         );
         translationFileUrl = translationResult.secure_url;
         translationCloudinaryId = translationResult.public_id;
@@ -228,7 +239,7 @@ router.post('/', requireAuth, upload.fields([
         const verificationResult = await uploadToCloudinary(
           file.buffer,
           `submissions/${req.userId}/verification`,
-          file.originalname
+          file.originalname, req.userId, file.mimetype
         );
         verificationDocUrl = verificationResult.secure_url;
         verificationCloudinaryId = verificationResult.public_id;
@@ -260,6 +271,7 @@ router.post('/', requireAuth, upload.fields([
       consent: {
         fileType: consentFileType,
         fileUrl: consentFileUrl,
+        fileCloudinaryId: consentCloudinaryId,
         consentType,
         consentNames,
         consentDate,
@@ -281,7 +293,7 @@ router.post('/', requireAuth, upload.fields([
 
     await dbConnect();
 
-    await submission.save();
+    await saveWithHistory(submission);
     console.log('✅ Submission saved:', submission._id);
 
     res.status(201).json({
@@ -295,7 +307,7 @@ router.post('/', requireAuth, upload.fields([
 
   } catch (error) {
     console.error('❌ Submission error:', error);
-    res.status(500).json({ 
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ 
       errors: [{ 
         msg: 'Failed to create submission', 
         detail: error.message 
@@ -304,25 +316,6 @@ router.post('/', requireAuth, upload.fields([
   }
 });
 
-// GET /api/submissions/my - Get user's own submissions
-// router.get('/my', requireAuth, async (req, res) => {
-//   try {
-
-//     await dbConnect();
-
-//     const submissions = await Submission.find({ userId: req.userId })
-//       .sort({ createdAt: -1 })
-//       .select('-__v');
-    
-//     res.json(submissions);
-//   } catch (error) {
-//     console.error('Fetch submissions error:', error);
-//     res.status(500).json({ errors: [{ msg: 'Failed to fetch submissions' }] });
-//   }
-// });
-
-
-// USer NEW DATA 
 // GET /api/submissions/my - Get user's own submissions WITH latest data
 router.get('/my', requireAuth, async (req, res) => {
   try {
@@ -425,7 +418,54 @@ router.get('/my', requireAuth, async (req, res) => {
     res.json(submissionsWithStatus);
   } catch (error) {
     console.error('Fetch submissions error:', error);
-    res.status(500).json({ errors: [{ msg: 'Failed to fetch submissions' }] });
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ errors: [{ msg: 'Failed to fetch submissions' }] });
+  }
+});
+
+// GET /api/submissions/my/stats - Get aggregate stats for the current user's submissions
+router.get('/my/stats', requireAuth, async (req, res) => {
+  try {
+    await dbConnect();
+
+    const userObjectId = new mongoose.Types.ObjectId(req.userId);
+
+    const [
+      totalSubmissions,
+      approvedSubmissions,
+      pendingSubmissions,
+      rejectedSubmissions,
+      pendingAmendments,
+      approvedAmendments,
+      rejectedAmendments,
+      engagement
+    ] = await Promise.all([
+      Submission.countDocuments({ userId: req.userId }),
+      Submission.countDocuments({ userId: req.userId, status: 'approved' }),
+      Submission.countDocuments({ userId: req.userId, status: 'pending' }),
+      Submission.countDocuments({ userId: req.userId, status: 'rejected' }),
+      AmendmentRequest.countDocuments({ userId: req.userId, status: 'pending' }),
+      AmendmentRequest.countDocuments({ userId: req.userId, status: 'approved' }),
+      AmendmentRequest.countDocuments({ userId: req.userId, status: 'rejected' }),
+      ApprovedContent.aggregate([
+        { $match: { userId: userObjectId } },
+        { $group: { _id: null, totalViews: { $sum: '$views' }, totalDownloads: { $sum: '$downloads' } } }
+      ])
+    ]);
+
+    res.json({
+      totalSubmissions,
+      approvedSubmissions,
+      pendingSubmissions,
+      rejectedSubmissions,
+      totalViews: engagement[0]?.totalViews || 0,
+      totalDownloads: engagement[0]?.totalDownloads || 0,
+      pendingAmendments,
+      approvedAmendments,
+      rejectedAmendments
+    });
+  } catch (error) {
+    console.error('Fetch submission stats error:', error);
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ errors: [{ msg: 'Failed to fetch submission stats' }] });
   }
 });
 
@@ -450,241 +490,9 @@ router.get('/:id', requireAuth, async (req, res) => {
     res.json(submission);
   } catch (error) {
     console.error('Fetch submission error:', error);
-    res.status(500).json({ errors: [{ msg: 'Failed to fetch submission' }] });
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ errors: [{ msg: 'Failed to fetch submission' }] });
   }
 });
-
-
-// PATCH /api/submissions/:id - Update submission
-// router.patch('/:id', requireAuth, upload.fields([
-//   { name: 'contentFile', maxCount: 1 },
-//   { name: 'consentFile', maxCount: 1 },
-//   { name: 'translationFile', maxCount: 1 },
-//   { name: 'verificationDoc', maxCount: 1 }
-// ]), async (req, res) => {
-//   try {
-//     console.log('📝 Update submission request from user:', req.userId);
-//     console.log('Submission ID:', req.params.id);
-
-//     await dbConnect();
-
-//     // Find existing submission
-//     const existingSubmission = await Submission.findOne({
-//       _id: req.params.id,
-//       userId: req.userId
-//     });
-
-//     if (!existingSubmission) {
-//       return res.status(404).json({ errors: [{ msg: 'Submission not found' }] });
-//     }
-
-//     // Store original data for potential rollback
-//     const originalData = {
-//       country: existingSubmission.country,
-//       stateRegion: existingSubmission.stateRegion,
-//       tribe: existingSubmission.tribe,
-//       village: existingSubmission.village,
-//       culturalDomain: existingSubmission.culturalDomain,
-//       title: existingSubmission.title,
-//       description: existingSubmission.description,
-//       keywords: existingSubmission.keywords,
-//       language: existingSubmission.language,
-//       dateOfRecording: existingSubmission.dateOfRecording,
-//       culturalSignificance: existingSubmission.culturalSignificance,
-//       contentFileType: existingSubmission.contentFileType,
-//       contentUrl: existingSubmission.contentUrl,
-//       contentCloudinaryId: existingSubmission.contentCloudinaryId,
-//       consent: existingSubmission.consent,
-//       accessTier: existingSubmission.accessTier,
-//       contentWarnings: existingSubmission.contentWarnings,
-//       warningOtherText: existingSubmission.warningOtherText,
-//       translationFileUrl: existingSubmission.translationFileUrl,
-//       translationCloudinaryId: existingSubmission.translationCloudinaryId,
-//       backgroundInfo: existingSubmission.backgroundInfo,
-//       verificationDocUrl: existingSubmission.verificationDocUrl,
-//       verificationCloudinaryId: existingSubmission.verificationCloudinaryId
-//     };
-
-//     // Store original state
-//     const wasApproved = existingSubmission.status === 'approved';
-
-//     // If submission was approved, store backup for rollback
-//     if (wasApproved) {
-//       existingSubmission.previousVersion = originalData;
-//       existingSubmission.previousVersionDate = new Date();
-//     }
-
-//     // Update fields from request body
-//     const {
-//       country, stateRegion, tribe, village, culturalDomain, title,
-//       description, keywords, language, dateOfRecording, culturalSignificance,
-//       contentFileType,
-//       consentFileType, consentType, consentNames, consentDate, 
-//       permissionType, consentDuration, digitalSignature,
-//       accessTier, contentWarnings, warningOtherText,
-//       backgroundInfo
-//     } = req.body;
-
-//     // Update text fields if provided
-//     if (country) existingSubmission.country = country;
-//     if (stateRegion) existingSubmission.stateRegion = stateRegion;
-//     if (tribe) existingSubmission.tribe = tribe;
-//     if (village) existingSubmission.village = village;
-//     if (culturalDomain) existingSubmission.culturalDomain = culturalDomain;
-//     if (title) existingSubmission.title = title;
-//     if (description) existingSubmission.description = description;
-//     if (keywords) existingSubmission.keywords = typeof keywords === 'string' ? keywords.split(',').map(k => k.trim()) : keywords;
-//     if (language) existingSubmission.language = language;
-//     if (dateOfRecording) existingSubmission.dateOfRecording = dateOfRecording;
-//     if (culturalSignificance) existingSubmission.culturalSignificance = culturalSignificance;
-//     if (contentFileType) existingSubmission.contentFileType = contentFileType;
-//     if (accessTier) existingSubmission.accessTier = accessTier;
-//     if (contentWarnings) existingSubmission.contentWarnings = typeof contentWarnings === 'string' ? JSON.parse(contentWarnings) : contentWarnings;
-//     if (warningOtherText) existingSubmission.warningOtherText = warningOtherText;
-//     if (backgroundInfo) existingSubmission.backgroundInfo = backgroundInfo;
-
-//     // Upload new content file if provided
-//     if (req.files?.contentFile?.[0]) {
-//       console.log('⬆️  Uploading new content file...');
-//       try {
-//         const file = req.files.contentFile[0];
-        
-//         // Delete old content file from Cloudinary
-//         if (existingSubmission.contentCloudinaryId) {
-//           await cloudinary.uploader.destroy(existingSubmission.contentCloudinaryId);
-//         }
-        
-//         const contentResult = await uploadToCloudinary(
-//           file.buffer,
-//           `submissions/${req.userId}/content`,
-//           file.originalname
-//         );
-        
-//         existingSubmission.contentUrl = contentResult.secure_url;
-//         existingSubmission.contentCloudinaryId = contentResult.public_id;
-//         console.log('✅ New content uploaded:', contentResult.secure_url);
-//       } catch (error) {
-//         console.error('❌ Content upload failed:', error);
-//         return res.status(500).json({ 
-//           errors: [{ msg: 'Failed to upload new content file: ' + error.message }] 
-//         });
-//       }
-//     }
-
-//     // Upload new consent file if provided
-//     if (req.files?.consentFile?.[0]) {
-//       console.log('⬆️  Uploading new consent file...');
-//       try {
-//         const file = req.files.consentFile[0];
-//         const consentResult = await uploadToCloudinary(
-//           file.buffer,
-//           `submissions/${req.userId}/consent`,
-//           file.originalname
-//         );
-        
-//         existingSubmission.consent.fileUrl = consentResult.secure_url;
-//         console.log('✅ New consent uploaded:', consentResult.secure_url);
-//       } catch (error) {
-//         console.error('❌ Consent upload failed:', error);
-//         return res.status(500).json({ 
-//           errors: [{ msg: 'Failed to upload new consent file: ' + error.message }] 
-//         });
-//       }
-//     }
-
-//     // Update consent fields
-//     if (consentFileType) existingSubmission.consent.fileType = consentFileType;
-//     if (consentType) existingSubmission.consent.consentType = consentType;
-//     if (consentNames) existingSubmission.consent.consentNames = consentNames;
-//     if (consentDate) existingSubmission.consent.consentDate = consentDate;
-//     if (permissionType) existingSubmission.consent.permissionType = typeof permissionType === 'string' ? JSON.parse(permissionType) : permissionType;
-//     if (consentDuration) existingSubmission.consent.duration = consentDuration;
-//     if (digitalSignature) existingSubmission.consent.digitalSignature = digitalSignature;
-
-//     // Upload new translation file if provided
-//     if (req.files?.translationFile?.[0]) {
-//       console.log('⬆️  Uploading new translation file...');
-//       try {
-//         const file = req.files.translationFile[0];
-        
-//         if (existingSubmission.translationCloudinaryId) {
-//           await cloudinary.uploader.destroy(existingSubmission.translationCloudinaryId);
-//         }
-        
-//         const translationResult = await uploadToCloudinary(
-//           file.buffer,
-//           `submissions/${req.userId}/translation`,
-//           file.originalname
-//         );
-        
-//         existingSubmission.translationFileUrl = translationResult.secure_url;
-//         existingSubmission.translationCloudinaryId = translationResult.public_id;
-//         console.log('✅ New translation uploaded:', translationResult.secure_url);
-//       } catch (error) {
-//         console.error('⚠️  Translation upload failed:', error);
-//       }
-//     }
-
-//     // Upload new verification document if provided
-//     if (req.files?.verificationDoc?.[0]) {
-//       console.log('⬆️  Uploading new verification document...');
-//       try {
-//         const file = req.files.verificationDoc[0];
-        
-//         if (existingSubmission.verificationCloudinaryId) {
-//           await cloudinary.uploader.destroy(existingSubmission.verificationCloudinaryId);
-//         }
-        
-//         const verificationResult = await uploadToCloudinary(
-//           file.buffer,
-//           `submissions/${req.userId}/verification`,
-//           file.originalname
-//         );
-        
-//         existingSubmission.verificationDocUrl = verificationResult.secure_url;
-//         existingSubmission.verificationCloudinaryId = verificationResult.public_id;
-//         console.log('✅ New verification uploaded:', verificationResult.secure_url);
-//       } catch (error) {
-//         console.error('⚠️  Verification upload failed:', error);
-//       }
-//     }
-
-//     // If content was approved, set status to pending for re-approval
-//     if (wasApproved) {
-//       existingSubmission.status = 'pending';
-//       existingSubmission.statusChangeReason = 'Content updated - awaiting re-approval';
-//       console.log('⚠️  Status changed to pending (was approved)');
-//     }
-
-//     existingSubmission.updatedAt = new Date();
-
-//     await existingSubmission.save();
-//     console.log('✅ Submission updated:', existingSubmission._id);
-
-//     res.json({
-//       message: wasApproved 
-//         ? 'Submission updated and sent for re-approval' 
-//         : 'Submission updated successfully',
-//       submission: {
-//         id: existingSubmission._id,
-//         title: existingSubmission.title,
-//         status: existingSubmission.status,
-//         requiresReapproval: wasApproved
-//       }
-//     });
-
-//   } catch (error) {
-//     console.error('❌ Update submission error:', error);
-//     res.status(500).json({ 
-//       errors: [{ 
-//         msg: 'Failed to update submission', 
-//         detail: error.message 
-//       }] 
-//     });
-//   }
-// });
-
-
 
 // PATCH /api/submissions/:id - Update submission
 router.patch('/:id', requireAuth, upload.fields([
@@ -708,6 +516,13 @@ router.patch('/:id', requireAuth, upload.fields([
       return res.status(404).json({ errors: [{ msg: 'Submission not found' }] });
     }
 
+    if (existingSubmission.status === 'approved') {
+      return res.status(409).json({ errors: [{ msg: 'Use an amendment request to edit published content' }] });
+    }
+    if (await AmendmentRequest.exists({ submissionId: existingSubmission._id, status: 'pending' })) {
+      return res.status(409).json({ errors: [{ msg: 'Cancel or review the pending amendment before editing this submission' }] });
+    }
+
     // Track what changed
     const changes = [];
     
@@ -723,31 +538,7 @@ router.patch('/:id', requireAuth, upload.fields([
     } = req.body;
 
     // Store original data for rollback
-    const originalData = {
-      country: existingSubmission.country,
-      stateRegion: existingSubmission.stateRegion,
-      tribe: existingSubmission.tribe,
-      village: existingSubmission.village,
-      culturalDomain: existingSubmission.culturalDomain,
-      title: existingSubmission.title,
-      description: existingSubmission.description,
-      keywords: existingSubmission.keywords,
-      language: existingSubmission.language,
-      dateOfRecording: existingSubmission.dateOfRecording,
-      culturalSignificance: existingSubmission.culturalSignificance,
-      contentFileType: existingSubmission.contentFileType,
-      contentUrl: existingSubmission.contentUrl,
-      contentCloudinaryId: existingSubmission.contentCloudinaryId,
-      consent: existingSubmission.consent,
-      accessTier: existingSubmission.accessTier,
-      contentWarnings: existingSubmission.contentWarnings,
-      warningOtherText: existingSubmission.warningOtherText,
-      translationFileUrl: existingSubmission.translationFileUrl,
-      translationCloudinaryId: existingSubmission.translationCloudinaryId,
-      backgroundInfo: existingSubmission.backgroundInfo,
-      verificationDocUrl: existingSubmission.verificationDocUrl,
-      verificationCloudinaryId: existingSubmission.verificationCloudinaryId
-    };
+    const originalData = contentSnapshot(existingSubmission);
 
     const wasApproved = existingSubmission.status === 'approved';
 
@@ -798,13 +589,10 @@ router.patch('/:id', requireAuth, upload.fields([
     // Upload new files if provided
     if (req.files?.contentFile?.[0]) {
       const file = req.files.contentFile[0];
-      if (existingSubmission.contentCloudinaryId) {
-        await cloudinary.uploader.destroy(existingSubmission.contentCloudinaryId);
-      }
       const contentResult = await uploadToCloudinary(
         file.buffer,
         `submissions/${req.userId}/content`,
-        file.originalname
+        file.originalname, req.userId, file.mimetype
       );
       existingSubmission.contentUrl = contentResult.secure_url;
       existingSubmission.contentCloudinaryId = contentResult.public_id;
@@ -815,9 +603,10 @@ router.patch('/:id', requireAuth, upload.fields([
       const consentResult = await uploadToCloudinary(
         file.buffer,
         `submissions/${req.userId}/consent`,
-        file.originalname
+        file.originalname, req.userId, file.mimetype
       );
       existingSubmission.consent.fileUrl = consentResult.secure_url;
+      existingSubmission.consent.fileCloudinaryId = consentResult.public_id;
     }
 
     if (consentFileType) existingSubmission.consent.fileType = consentFileType;
@@ -830,13 +619,10 @@ router.patch('/:id', requireAuth, upload.fields([
 
     if (req.files?.translationFile?.[0]) {
       const file = req.files.translationFile[0];
-      if (existingSubmission.translationCloudinaryId) {
-        await cloudinary.uploader.destroy(existingSubmission.translationCloudinaryId);
-      }
       const translationResult = await uploadToCloudinary(
         file.buffer,
         `submissions/${req.userId}/translation`,
-        file.originalname
+        file.originalname, req.userId, file.mimetype
       );
       existingSubmission.translationFileUrl = translationResult.secure_url;
       existingSubmission.translationCloudinaryId = translationResult.public_id;
@@ -844,13 +630,10 @@ router.patch('/:id', requireAuth, upload.fields([
 
     if (req.files?.verificationDoc?.[0]) {
       const file = req.files.verificationDoc[0];
-      if (existingSubmission.verificationCloudinaryId) {
-        await cloudinary.uploader.destroy(existingSubmission.verificationCloudinaryId);
-      }
       const verificationResult = await uploadToCloudinary(
         file.buffer,
         `submissions/${req.userId}/verification`,
-        file.originalname
+        file.originalname, req.userId, file.mimetype
       );
       existingSubmission.verificationDocUrl = verificationResult.secure_url;
       existingSubmission.verificationCloudinaryId = verificationResult.public_id;
@@ -867,7 +650,7 @@ router.patch('/:id', requireAuth, upload.fields([
 
     existingSubmission.updatedAt = new Date();
 
-    await existingSubmission.save();
+    await saveWithHistory(existingSubmission);
     console.log('✅ Submission updated:', existingSubmission._id);
 
     res.json({
@@ -886,7 +669,7 @@ router.patch('/:id', requireAuth, upload.fields([
 
   } catch (error) {
     console.error('❌ Update submission error:', error);
-    res.status(500).json({ 
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ 
       errors: [{ 
         msg: 'Failed to update submission', 
         detail: error.message 
@@ -906,7 +689,7 @@ router.patch('/:id', requireAuth, upload.fields([
 
 
 // PATCH /api/submissions/:id/approve - Admin approve submission (with rollback on rejection)
-router.patch('/:id/approve', requireAuth, async (req, res) => {
+router.patch('/:id/approve', requireAuth, requirePermission(PERMISSIONS.SUBMISSION_APPROVE), async (req, res) => {
   try {
     const { approved, reason } = req.body;
 
@@ -918,41 +701,9 @@ router.patch('/:id/approve', requireAuth, async (req, res) => {
       return res.status(404).json({ errors: [{ msg: 'Submission not found' }] });
     }
 
-    // TODO: Add admin role check here
-    // if (req.userRole !== 'admin') {
-    //   return res.status(403).json({ errors: [{ msg: 'Admin access required' }] });
-    // }
-
-    if (approved) {
-      submission.status = 'approved';
-      submission.statusChangeReason = reason || 'Approved by admin';
-      submission.approvedAt = new Date();
-      // Clear previous version after approval
-      submission.previousVersion = undefined;
-      submission.previousVersionDate = undefined;
-      console.log('✅ Submission approved:', submission._id);
-    } else {
-      // Rollback to previous version if it exists
-      if (submission.previousVersion) {
-        console.log('🔄 Rolling back to previous version...');
-        
-        // Restore all fields from previous version
-        Object.assign(submission, submission.previousVersion);
-        
-        submission.status = 'approved'; // Restore to approved state
-        submission.statusChangeReason = reason || 'Changes rejected - reverted to previous version';
-        submission.previousVersion = undefined;
-        submission.previousVersionDate = undefined;
-        
-        console.log('✅ Rollback completed');
-      } else {
-        submission.status = 'rejected';
-        submission.statusChangeReason = reason || 'Rejected by admin';
-        console.log('❌ Submission rejected:', submission._id);
-      }
-    }
-
-    await submission.save();
+    if (typeof approved !== 'boolean') return res.status(400).json({ errors: [{ msg: 'approved must be a boolean' }] });
+    const reviewed = await reviewSubmission(submission._id, req.userId, approved, reason);
+    Object.assign(submission, reviewed.toObject());
 
     res.json({
       message: approved ? 'Submission approved' : 'Changes rejected and rolled back',
@@ -965,7 +716,7 @@ router.patch('/:id/approve', requireAuth, async (req, res) => {
 
   } catch (error) {
     console.error('❌ Approve/reject submission error:', error);
-    res.status(500).json({ 
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ 
       errors: [{ 
         msg: 'Failed to process submission', 
         detail: error.message 
@@ -997,13 +748,15 @@ router.get('/:id/history', requireAuth, async (req, res) => {
     })
     .sort({ versionNumber: -1 }) // Latest first
     .populate('reviewedBy', 'name email')
-    .populate('userId', 'name email avatar');
+    .populate('userId', 'name email');
+
+    const amendmentsWithDetails = await attachUserDetails(amendments, 'userId', ['avatar']);
 
     // Build version history
     const versionHistory = [];
 
     // Add each amendment as a version entry
-    amendments.forEach(amendment => {
+    amendmentsWithDetails.forEach(amendment => {
       const versionEntry = {
         version: amendment.versionNumber,
         status: amendment.status,
@@ -1062,7 +815,7 @@ router.get('/:id/history', requireAuth, async (req, res) => {
 
   } catch (error) {
     console.error('Fetch version history error:', error);
-    res.status(500).json({ 
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ 
       errors: [{ msg: 'Failed to fetch version history' }] 
     });
   }
@@ -1135,7 +888,7 @@ router.get('/:id/version/:versionNumber', requireAuth, async (req, res) => {
 
   } catch (error) {
     console.error('Fetch version error:', error);
-    res.status(500).json({ 
+    res.status(error.status || (error.name === 'VersionError' ? 409 : 500)).json({ 
       errors: [{ msg: 'Failed to fetch version' }] 
     });
   }
